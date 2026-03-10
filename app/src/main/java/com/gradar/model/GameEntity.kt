@@ -1,5 +1,7 @@
 package com.gradar.model
 
+import com.gradar.protocol.PhotonProtocol
+
 /**
  * Represents a game entity in the radar
  */
