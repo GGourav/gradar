@@ -123,7 +123,7 @@ fi
 #   * args from the command line
 #   * the main class name
 #   * -classpath
-#   * -D... properties
+#   * -D...appname settings
 #   * --module-path (only if needed)
 #   * DEFAULT_JVM_OPTS, JAVA_OPTS, and GRADLE_OPTS environment variables.
 
@@ -147,9 +147,7 @@ if "$cygwin" || "$msys" ; then
             arg=$( cygpath --path --ignore --mixed "$arg" )
         fi
         # Roll the args list around exactly as many times as the number of
-        # temporary variables assigned, so each argument winds up back in the
-        # temporary variable previously (and alarm bells alarm bells alarm bells)
-        # assigned to the next argument.
+        # temporary variables used, so that the stack is returned to its start.
         shift                   # remove $arg
         set -- "$@" "$arg"      # push $arg onto the end
     done
@@ -159,9 +157,18 @@ fi
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 
-# Collect all arguments for the java command:
-#   * DEFAULT_JVM_OPTS, JAVA_OPTS, GRADLE_OPTS, and GRADLE_WRAPPER_OPTS environment variables.
-#   * args from the command line
+# Collect all arguments for the java command;
+#   * $DEFAULT_JVM_OPTS, $JAVA_OPTS, and $GRADLE_OPTS can contain fragments of
+#     temporary arguments, e.g. -Dfoo=bar -Dbaz="qux qux", instead of being
+#     temporary arguments themselves.
+#   * Shell special characters in $DEFAULT_JVM_OPTS, $JAVA_OPTS, and
+#     $GRADLE_OPTS are automatically escaped.
+#   * DEFAULT_JVM_OPTS, JAVA_OPTS, and GRADLE_OPTS are parsed with
+#     the shell's word-expansion functionality, which means that
+#     shell special characters are preserved, and quotes are used
+#     to group arguments.
+#
+# See https://github.com/gradle/gradle/issues/10872 for context.
 
 set -- \
         "-Dorg.gradle.appname=$APP_BASE_NAME" \
@@ -177,4 +184,13 @@ fi
 
 # Use "xargs" to parse quoted args.
 #
-# With -n://1//, we process at most one arg
+# With -n://1//, we process at most one arg per execution.
+#
+eval "set -- $(
+        printf '%s\n' "$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS" |
+        xargs -n1 |
+        sed ' s~[^-[:alnum:]+,./:=@_]~\\&~g; ' |
+        tr '\n' ' '
+    )" '"$@"'
+
+exec "$JAVACMD" "$@"
