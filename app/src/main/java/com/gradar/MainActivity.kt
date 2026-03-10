@@ -2,177 +2,97 @@ package com.gradar
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Button
+import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.gradar.databinding.ActivityMainBinding
 import com.gradar.service.RadarOverlayService
 import com.gradar.service.RadarVpnService
 
-/**
- * Main Activity - Entry point for G Radar
- * Handles VPN permission request and service lifecycle
- */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityMainBinding
-    private var isVpnConnected = false
-    private var isOverlayShowing = false
-
-    // VPN permission launcher
-    private val vpnPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            startVpnService()
-        } else {
-            Toast.makeText(this, R.string.vpn_permission_denied, Toast.LENGTH_LONG).show()
-        }
-    }
-
-    // Overlay permission launcher
-    private val overlayPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        if (Settings.canDrawOverlays(this)) {
-            startOverlayService()
-        } else {
-            Toast.makeText(this, R.string.overlay_permission_denied, Toast.LENGTH_LONG).show()
-        }
-    }
+    private var isRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        setContentView(R.layout.activity_main)
 
-        setupUI()
-        checkPermissions()
-    }
+        val btnStart = findViewById<Button>(R.id.btnStart)
+        val tvStatus = findViewById<TextView>(R.id.tvStatus)
+        val tvOverlay = findViewById<TextView>(R.id.tvOverlay)
 
-    private fun setupUI() {
-        // Start/Stop Radar button
-        binding.btnStartRadar.setOnClickListener {
-            if (isVpnConnected) {
+        updateOverlayStatus(tvOverlay)
+
+        btnStart.setOnClickListener {
+            if (isRunning) {
                 stopRadar()
+                btnStart.text = "Start Radar"
+                tvStatus.text = "Status: Stopped"
+                isRunning = false
             } else {
-                startRadar()
+                if (!Settings.canDrawOverlays(this)) {
+                    requestOverlayPermission()
+                    return@setOnClickListener
+                }
+                
+                val vpnIntent = VpnService.prepare(this)
+                if (vpnIntent != null) {
+                    startActivityForResult(vpnIntent, 1000)
+                } else {
+                    startRadar()
+                    btnStart.text = "Stop Radar"
+                    tvStatus.text = "Status: Running"
+                    isRunning = true
+                }
             }
         }
-
-        // Settings button (placeholder for Step 4)
-        binding.btnSettings.setOnClickListener {
-            Toast.makeText(this, "Settings will be implemented in Step 4", Toast.LENGTH_SHORT).show()
-        }
-
-        // Version display
-        binding.tvVersion.text = getString(
-            R.string.version_format,
-            BuildConfig.VERSION_NAME,
-            BuildConfig.VERSION_CODE
-        )
-    }
-
-    private fun checkPermissions() {
-        updateOverlayPermissionStatus()
     }
 
     private fun startRadar() {
-        // Check overlay permission first
-        if (!Settings.canDrawOverlays(this)) {
-            requestOverlayPermission()
-            return
-        }
-
-        // Request VPN permission
-        val vpnIntent = VpnService.prepare(this)
-        if (vpnIntent != null) {
-            vpnPermissionLauncher.launch(vpnIntent)
-        } else {
-            // VPN already prepared
-            startVpnService()
-        }
-    }
-
-    private fun startVpnService() {
-        val intent = Intent(this, RadarVpnService::class.java).apply {
-            action = RadarVpnService.ACTION_START
-        }
-        startService(intent)
-        
-        isVpnConnected = true
-        updateUI()
-        
-        // Start overlay service
-        startOverlayService()
-        
-        Toast.makeText(this, R.string.radar_started, Toast.LENGTH_SHORT).show()
-    }
-
-    private fun startOverlayService() {
-        val intent = Intent(this, RadarOverlayService::class.java).apply {
-            action = RadarOverlayService.ACTION_START
-        }
-        startService(intent)
-        isOverlayShowing = true
+        startService(Intent(this, RadarVpnService::class.java).setAction("START"))
+        startService(Intent(this, RadarOverlayService::class.java).setAction("START"))
+        Toast.makeText(this, "Radar Started", Toast.LENGTH_SHORT).show()
     }
 
     private fun stopRadar() {
-        // Stop VPN service
-        val vpnIntent = Intent(this, RadarVpnService::class.java).apply {
-            action = RadarVpnService.ACTION_STOP
-        }
-        startService(vpnIntent)
-
-        // Stop overlay service
-        val overlayIntent = Intent(this, RadarOverlayService::class.java).apply {
-            action = RadarOverlayService.ACTION_STOP
-        }
-        startService(overlayIntent)
-
-        isVpnConnected = false
-        isOverlayShowing = false
-        updateUI()
-        
-        Toast.makeText(this, R.string.radar_stopped, Toast.LENGTH_SHORT).show()
+        startService(Intent(this, RadarVpnService::class.java).setAction("STOP"))
+        startService(Intent(this, RadarOverlayService::class.java).setAction("STOP"))
+        Toast.makeText(this, "Radar Stopped", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestOverlayPermission() {
         val intent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            android.net.Uri.parse("package:$packageName")
+            Uri.parse("package:$packageName")
         )
-        overlayPermissionLauncher.launch(intent)
+        startActivity(intent)
     }
 
-    private fun updateOverlayPermissionStatus() {
-        val hasOverlayPermission = Settings.canDrawOverlays(this)
-        binding.tvOverlayStatus.text = if (hasOverlayPermission) {
-            getString(R.string.overlay_permission_granted)
+    private fun updateOverlayStatus(tv: TextView) {
+        tv.text = if (Settings.canDrawOverlays(this)) {
+            "Overlay: Granted"
         } else {
-            getString(R.string.overlay_permission_required)
-        }
-    }
-
-    private fun updateUI() {
-        binding.btnStartRadar.text = if (isVpnConnected) {
-            getString(R.string.stop_radar)
-        } else {
-            getString(R.string.start_radar)
-        }
-        
-        binding.tvVpnStatus.text = if (isVpnConnected) {
-            getString(R.string.vpn_connected)
-        } else {
-            getString(R.string.vpn_disconnected)
+            "Overlay: Required"
         }
     }
 
     override fun onResume() {
         super.onResume()
-        updateOverlayPermissionStatus()
+        val tvOverlay = findViewById<TextView>(R.id.tvOverlay)
+        updateOverlayStatus(tvOverlay)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 1000 && resultCode == Activity.RESULT_OK) {
+            startRadar()
+            findViewById<Button>(R.id.btnStart).text = "Stop Radar"
+            findViewById<TextView>(R.id.tvStatus).text = "Status: Running"
+            isRunning = true
+        }
     }
 }
