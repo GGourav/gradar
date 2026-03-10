@@ -55,7 +55,11 @@ class RadarVpnService : VpnService() {
 
     private fun startVpn() {
         Log.d(TAG, "Starting VPN...")
-        startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            startForeground(NOTIFICATION_ID, createNotification())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground: ${e.message}")
+        }
         
         vpnInterface = establishVpn()
         if (vpnInterface == null) {
@@ -71,18 +75,31 @@ class RadarVpnService : VpnService() {
 
     private fun establishVpn(): ParcelFileDescriptor? {
         return try {
-            Builder()
+            val builder = Builder()
                 .setMtu(MTU)
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
                 .addRoute(VPN_ROUTE, 0)
                 .addDnsServer(DNS_PRIMARY)
                 .addDnsServer(DNS_SECONDARY)
-                .addAllowedApplication(GRadarApp.ALBION_PACKAGE)
-                .addAllowedApplication(packageName)
                 .setSession(getString(R.string.vpn_session_name))
-                .establish()
+            
+            // Try to add Albion Online app, but don't crash if not installed
+            try {
+                builder.addAllowedApplication(GRadarApp.ALBION_PACKAGE)
+            } catch (e: Exception) {
+                Log.w(TAG, "Albion Online not installed, capturing all traffic")
+            }
+            
+            // Always allow our own app
+            try {
+                builder.addAllowedApplication(packageName)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not add self to allowed apps")
+            }
+            
+            builder.establish()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to establish VPN: ${e.message}")
+            Log.e(TAG, "Failed to establish VPN: ${e.message}", e)
             null
         }
     }
@@ -94,6 +111,7 @@ class RadarVpnService : VpnService() {
                 val size = input.read(packetBuffer.array())
                 if (size > 0) {
                     // TODO: Implement packet parsing in Step 2
+                    Log.v(TAG, "Captured packet: $size bytes")
                 }
                 packetBuffer.clear()
             }
