@@ -45,7 +45,12 @@ class RadarOverlayService : android.app.Service() {
     }
 
     private fun showOverlay() {
-        startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            startForeground(NOTIFICATION_ID, createNotification())
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to start foreground: ${e.message}")
+        }
+        
         radarView = createRadarView()
         
         val layoutParams = android.view.WindowManager.LayoutParams(
@@ -67,8 +72,13 @@ class RadarOverlayService : android.app.Service() {
             y = 100
         }
         
-        windowManager?.addView(radarView, layoutParams)
-        isShowing = true
+        try {
+            windowManager?.addView(radarView, layoutParams)
+            isShowing = true
+            android.util.Log.d(TAG, "Overlay shown successfully")
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to show overlay: ${e.message}")
+        }
     }
 
     private fun createRadarView(): View {
@@ -88,9 +98,13 @@ class RadarOverlayService : android.app.Service() {
     }
 
     private fun hideOverlay() {
-        radarView?.let {
-            windowManager?.removeView(it)
-            radarView = null
+        try {
+            radarView?.let {
+                windowManager?.removeView(it)
+                radarView = null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to hide overlay: ${e.message}")
         }
         isShowing = false
     }
