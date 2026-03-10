@@ -17,6 +17,8 @@ import com.gradar.protocol.PhotonProtocol
 import org.greenrobot.eventbus.EventBus
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.DatagramSocket
+import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 
@@ -61,6 +63,7 @@ class RadarVpnService : VpnService() {
     
     // Network channel for forwarding
     private var tunnelChannel: DatagramChannel? = null
+    private var tunnelSocket: DatagramSocket? = null
     
     // Stats
     private var packetsCaptured = 0L
@@ -99,7 +102,11 @@ class RadarVpnService : VpnService() {
         try {
             tunnelChannel = DatagramChannel.open()
             tunnelChannel?.configureBlocking(false)
-            protect(tunnelChannel?.socket!!) // Protect from VPN loop
+            tunnelSocket = tunnelChannel?.socket()
+            // Protect from VPN loop
+            if (tunnelSocket != null) {
+                protect(tunnelSocket!!)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open tunnel: ${e.message}")
         }
@@ -148,7 +155,6 @@ class RadarVpnService : VpnService() {
      */
     private fun readFromVpn() {
         val input = FileInputStream(vpnInterface!!.fileDescriptor)
-        val output = FileOutputStream(vpnInterface!!.fileDescriptor)
         val buffer = ByteBuffer.allocate(MTU)
         
         try {
@@ -202,7 +208,7 @@ class RadarVpnService : VpnService() {
         // Check if Albion traffic
         if (dstPort != ALBION_PORT) return
         
-        val dstAddress = java.net.InetSocketAddress(
+        val dstAddress = InetSocketAddress(
             "${(dstIp shr 24) and 0xFF}.${(dstIp shr 16) and 0xFF}.${(dstIp shr 8) and 0xFF}.${dstIp and 0xFF}",
             dstPort
         )
@@ -304,6 +310,9 @@ class RadarVpnService : VpnService() {
         
         writeThread?.interrupt()
         writeThread = null
+        
+        tunnelSocket?.close()
+        tunnelSocket = null
         
         tunnelChannel?.close()
         tunnelChannel = null
