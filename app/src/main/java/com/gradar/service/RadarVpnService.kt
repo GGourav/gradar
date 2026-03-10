@@ -16,10 +16,13 @@ import com.gradar.protocol.PhotonParser
 import com.gradar.protocol.PhotonProtocol
 import org.greenrobot.eventbus.EventBus
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.nio.channels.DatagramChannel
 
 /**
  * VPN Service for capturing Albion Online network traffic
+ * Implements proper packet tunneling to maintain connectivity
  */
 class RadarVpnService : VpnService() {
 
@@ -29,9 +32,9 @@ class RadarVpnService : VpnService() {
         const val ACTION_STOP = "com.gradar.action.STOP"
         const val NOTIFICATION_ID = 1001
         
-        private const val MTU = 2048
+        private const val MTU = 32767
         private const val VPN_ADDRESS = "10.8.0.2"
-        private const val VPN_PREFIX = 32
+        private const val VPN_PREFIX = 24
         private const val VPN_ROUTE = "0.0.0.0"
         private const val DNS_PRIMARY = "8.8.8.8"
         private const val DNS_SECONDARY = "8.8.4.4"
@@ -46,13 +49,18 @@ class RadarVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var vpnThread: Thread? = null
+    private var readThread: Thread? = null
+    private var writeThread: Thread? = null
+    
     private val packetBuffer = ByteBuffer.allocate(MTU)
     
     // Packet processing
     private val photonParser = PhotonParser()
     private val eventHandler = EventHandler()
     private lateinit var discoveryLogger: DiscoveryLogger
+    
+    // Network channel for forwarding
+    private var tunnelChannel: DatagramChannel? = null
     
     // Stats
     private var packetsCaptured = 0L
@@ -87,8 +95,20 @@ class RadarVpnService : VpnService() {
             return
         }
         
+        // Open tunnel channel
+        try {
+            tunnelChannel = DatagramChannel.open()
+            tunnelChannel?.configureBlocking(false)
+            protect(tunnelChannel?.socket!!) // Protect from VPN loop
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open tunnel: ${e.message}")
+        }
+        
         isRunning = true
-        vpnThread = Thread { capturePackets() }.apply { start() }
+        
+        // Start read thread (VPN -> Network)
+        readThread = Thread { readFromVpn() }.apply { start() }
+        
         Log.d(TAG, "VPN started successfully")
     }
 
@@ -102,14 +122,14 @@ class RadarVpnService : VpnService() {
                 .addDnsServer(DNS_SECONDARY)
                 .setSession(getString(R.string.vpn_session_name))
             
-            // Try to add Albion Online app
+            // Try to add Albion Online app only
             try {
                 builder.addAllowedApplication(GRadarApp.ALBION_PACKAGE)
             } catch (e: Exception) {
-                Log.w(TAG, "Albion Online not installed, capturing all traffic")
+                Log.w(TAG, "Albion Online not installed")
             }
             
-            // Always allow our own app
+            // Add our app for debugging
             try {
                 builder.addAllowedApplication(packageName)
             } catch (e: Exception) {
@@ -123,50 +143,106 @@ class RadarVpnService : VpnService() {
         }
     }
 
-    private fun capturePackets() {
+    /**
+     * Read packets from VPN interface
+     */
+    private fun readFromVpn() {
         val input = FileInputStream(vpnInterface!!.fileDescriptor)
+        val output = FileOutputStream(vpnInterface!!.fileDescriptor)
+        val buffer = ByteBuffer.allocate(MTU)
         
         try {
             while (isRunning && vpnInterface != null) {
-                val size = input.read(packetBuffer.array())
+                // Read packet from VPN
+                val size = input.read(buffer.array())
                 if (size > 0) {
                     packetsCaptured++
-                    processPacket(packetBuffer.array(), size)
+                    
+                    // Process packet for radar
+                    processPacket(buffer.array(), size)
+                    
+                    // Forward packet to real network
+                    try {
+                        forwardPacket(buffer.array(), size)
+                    } catch (e: Exception) {
+                        Log.v(TAG, "Forward error: ${e.message}")
+                    }
                 }
-                packetBuffer.clear()
+                buffer.clear()
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Packet capture stopped: ${e.message}")
+            Log.d(TAG, "Read stopped: ${e.message}")
         }
     }
 
     /**
-     * Process a captured packet
+     * Forward packet to actual destination
+     */
+    private fun forwardPacket(data: ByteArray, size: Int) {
+        if (size < 20) return
+        
+        val ipVersion = (data[0].toInt() shr 4) and 0x0F
+        if (ipVersion != 4) return
+        
+        val ipHeaderLength = (data[0].toInt() and 0x0F) * 4
+        val protocol = data[9].toInt() and 0xFF
+        
+        if (protocol != 17) return // Only UDP
+        if (size < ipHeaderLength + 8) return
+        
+        // Get destination IP and port
+        val dstIp = ((data[16].toInt() and 0xFF) shl 24) or
+                    ((data[17].toInt() and 0xFF) shl 16) or
+                    ((data[18].toInt() and 0xFF) shl 8) or
+                    (data[19].toInt() and 0xFF)
+        
+        val dstPort = ((data[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
+                      (data[ipHeaderLength + 3].toInt() and 0xFF)
+        
+        // Check if Albion traffic
+        if (dstPort != ALBION_PORT) return
+        
+        val dstAddress = java.net.InetSocketAddress(
+            "${(dstIp shr 24) and 0xFF}.${(dstIp shr 16) and 0xFF}.${(dstIp shr 8) and 0xFF}.${dstIp and 0xFF}",
+            dstPort
+        )
+        
+        // Send through protected socket
+        val payload = data.copyOfRange(ipHeaderLength + 8, size)
+        val sendBuffer = ByteBuffer.wrap(payload)
+        
+        try {
+            tunnelChannel?.send(sendBuffer, dstAddress)
+        } catch (e: Exception) {
+            Log.v(TAG, "Send error: ${e.message}")
+        }
+    }
+
+    /**
+     * Process a captured packet for radar
      */
     private fun processPacket(data: ByteArray, size: Int) {
         try {
-            // Parse IP header to find UDP packets
-            if (size < 20) return // Minimum IP header size
+            if (size < 20) return
             
             val ipVersion = (data[0].toInt() shr 4) and 0x0F
-            if (ipVersion != 4) return // Only IPv4 for now
+            if (ipVersion != 4) return
             
             val ipHeaderLength = (data[0].toInt() and 0x0F) * 4
             val protocol = data[9].toInt() and 0xFF
             
-            // Check if UDP
             if (protocol != 17) return
             
-            // Parse UDP header
             if (size < ipHeaderLength + 8) return
             
-            val srcPort = ((data[ipHeaderLength].toInt() and 0xFF) shl 8) or (data[ipHeaderLength + 1].toInt() and 0xFF)
-            val dstPort = ((data[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or (data[ipHeaderLength + 3].toInt() and 0xFF)
+            val srcPort = ((data[ipHeaderLength].toInt() and 0xFF) shl 8) or 
+                          (data[ipHeaderLength + 1].toInt() and 0xFF)
+            val dstPort = ((data[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or 
+                          (data[ipHeaderLength + 3].toInt() and 0xFF)
             
-            // Check if this is Albion traffic (port 5056)
+            // Only process Albion traffic
             if (srcPort != ALBION_PORT && dstPort != ALBION_PORT) return
             
-            // Extract UDP payload
             val udpPayloadStart = ipHeaderLength + 8
             if (size <= udpPayloadStart) return
             
@@ -195,7 +271,7 @@ class RadarVpnService : VpnService() {
                 if (event != null) {
                     eventsProcessed++
                     
-                    // Log all events for discovery
+                    // Log for discovery
                     discoveryLogger.logParsedEvent(event.eventCode, event.parameters)
                     
                     // Process event
@@ -222,12 +298,19 @@ class RadarVpnService : VpnService() {
     private fun stopVpn() {
         Log.d(TAG, "Stopping VPN...")
         isRunning = false
-        vpnThread?.interrupt()
-        vpnThread = null
+        
+        readThread?.interrupt()
+        readThread = null
+        
+        writeThread?.interrupt()
+        writeThread = null
+        
+        tunnelChannel?.close()
+        tunnelChannel = null
+        
         vpnInterface?.close()
         vpnInterface = null
         
-        // Clear entities
         eventHandler.clear()
         
         Log.d(TAG, "Stats: $packetsCaptured packets, $eventsProcessed events")
