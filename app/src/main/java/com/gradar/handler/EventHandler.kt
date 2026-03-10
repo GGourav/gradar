@@ -2,6 +2,7 @@ package com.gradar.handler
 
 import android.util.Log
 import com.gradar.model.GameEntity
+import com.gradar.protocol.PhotonParser
 import com.gradar.protocol.PhotonProtocol
 
 /**
