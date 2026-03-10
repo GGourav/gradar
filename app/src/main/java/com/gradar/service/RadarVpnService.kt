@@ -12,66 +12,116 @@ import com.gradar.R
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 
+/**
+ * VPN Service for capturing Albion Online network traffic
+ */
 class RadarVpnService : VpnService() {
 
     companion object {
-        private const val TAG = "RadarVpn"
+        const val TAG = "RadarVpnService"
+        const val ACTION_START = "com.gradar.action.START"
+        const val ACTION_STOP = "com.gradar.action.STOP"
+        const val NOTIFICATION_ID = 1001
+        
         private const val MTU = 2048
-        private const val NOTIFICATION_ID = 1001
+        private const val VPN_ADDRESS = "10.8.0.2"
+        private const val VPN_PREFIX = 32
+        private const val VPN_ROUTE = "0.0.0.0"
+        private const val DNS_PRIMARY = "8.8.8.8"
+        private const val DNS_SECONDARY = "8.8.4.4"
+        
+        @Volatile
+        private var isRunning = false
+        
+        fun isRunning(): Boolean = isRunning
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var isRunning = false
+    private var vpnThread: Thread? = null
+    private val packetBuffer = ByteBuffer.allocate(MTU)
+
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "VPN Service created")
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            "START" -> startVpn()
-            "STOP" -> stopVpn()
+            ACTION_START -> if (!isRunning) startVpn()
+            ACTION_STOP -> { stopVpn(); stopSelf() }
         }
         return START_STICKY
     }
 
     private fun startVpn() {
-        if (isRunning) return
-        
+        Log.d(TAG, "Starting VPN...")
         startForeground(NOTIFICATION_ID, createNotification())
         
-        vpnInterface = Builder()
-            .setMtu(MTU)
-            .addAddress("10.8.0.2", 32)
-            .addRoute("0.0.0.0", 0)
-            .addDnsServer("8.8.8.8")
-            .addAllowedApplication(GRadarApp.ALBION_PACKAGE)
-            .addAllowedApplication(packageName)
-            .setSession("G Radar VPN")
-            .establish()
+        vpnInterface = establishVpn()
+        if (vpnInterface == null) {
+            Log.e(TAG, "Failed to establish VPN interface")
+            stopSelf()
+            return
+        }
+        
+        isRunning = true
+        vpnThread = Thread { capturePackets() }.apply { start() }
+        Log.d(TAG, "VPN started successfully")
+    }
 
-        if (vpnInterface != null) {
-            isRunning = true
-            Log.d(TAG, "VPN Started")
+    private fun establishVpn(): ParcelFileDescriptor? {
+        return try {
+            Builder()
+                .setMtu(MTU)
+                .addAddress(VPN_ADDRESS, VPN_PREFIX)
+                .addRoute(VPN_ROUTE, 0)
+                .addDnsServer(DNS_PRIMARY)
+                .addDnsServer(DNS_SECONDARY)
+                .addAllowedApplication(GRadarApp.ALBION_PACKAGE)
+                .addAllowedApplication(packageName)
+                .setSession(getString(R.string.vpn_session_name))
+                .establish()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to establish VPN: ${e.message}")
+            null
+        }
+    }
+
+    private fun capturePackets() {
+        val input = FileInputStream(vpnInterface!!.fileDescriptor)
+        try {
+            while (isRunning && vpnInterface != null) {
+                val size = input.read(packetBuffer.array())
+                if (size > 0) {
+                    // TODO: Implement packet parsing in Step 2
+                }
+                packetBuffer.clear()
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Packet capture stopped: ${e.message}")
         }
     }
 
     private fun stopVpn() {
+        Log.d(TAG, "Stopping VPN...")
         isRunning = false
+        vpnThread?.interrupt()
+        vpnThread = null
         vpnInterface?.close()
         vpnInterface = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-        Log.d(TAG, "VPN Stopped")
     }
 
     private fun createNotification(): Notification {
-        val intent = PendingIntent.getActivity(
+        val pendingIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
-        return Notification.Builder(this, GRadarApp.CHANNEL_VPN)
-            .setContentTitle("G Radar")
-            .setContentText("VPN Active")
+        return Notification.Builder(this, GRadarApp.CHANNEL_VPN_SERVICE)
+            .setContentTitle(getString(R.string.notification_vpn_title))
+            .setContentText(getString(R.string.notification_vpn_text))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(intent)
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
     }
@@ -79,5 +129,6 @@ class RadarVpnService : VpnService() {
     override fun onDestroy() {
         stopVpn()
         super.onDestroy()
+        Log.d(TAG, "VPN Service destroyed")
     }
 }
