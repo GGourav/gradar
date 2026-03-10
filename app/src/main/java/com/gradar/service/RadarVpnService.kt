@@ -9,6 +9,12 @@ import android.util.Log
 import com.gradar.GRadarApp
 import com.gradar.MainActivity
 import com.gradar.R
+import com.gradar.handler.EventHandler
+import com.gradar.logger.DiscoveryLogger
+import com.gradar.model.GameEntity
+import com.gradar.protocol.PhotonProtocol
+import com.gradar.protocol.PhotonParser
+import org.greenrobot.eventbus.EventBus
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 
@@ -30,6 +36,9 @@ class RadarVpnService : VpnService() {
         private const val DNS_PRIMARY = "8.8.8.8"
         private const val DNS_SECONDARY = "8.8.4.4"
         
+        // Albion Online server port
+        private const val ALBION_PORT = 5056
+        
         @Volatile
         private var isRunning = false
         
@@ -39,9 +48,19 @@ class RadarVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var vpnThread: Thread? = null
     private val packetBuffer = ByteBuffer.allocate(MTU)
+    
+    // Packet processing
+    private val photonParser = PhotonParser()
+    private val eventHandler = EventHandler()
+    private lateinit var discoveryLogger: DiscoveryLogger
+    
+    // Stats
+    private var packetsCaptured = 0L
+    private var eventsProcessed = 0L
 
     override fun onCreate() {
         super.onCreate()
+        discoveryLogger = DiscoveryLogger(this)
         Log.d(TAG, "VPN Service created")
     }
 
@@ -83,7 +102,7 @@ class RadarVpnService : VpnService() {
                 .addDnsServer(DNS_SECONDARY)
                 .setSession(getString(R.string.vpn_session_name))
             
-            // Try to add Albion Online app, but don't crash if not installed
+            // Try to add Albion Online app
             try {
                 builder.addAllowedApplication(GRadarApp.ALBION_PACKAGE)
             } catch (e: Exception) {
@@ -106,12 +125,13 @@ class RadarVpnService : VpnService() {
 
     private fun capturePackets() {
         val input = FileInputStream(vpnInterface!!.fileDescriptor)
+        
         try {
             while (isRunning && vpnInterface != null) {
                 val size = input.read(packetBuffer.array())
                 if (size > 0) {
-                    // TODO: Implement packet parsing in Step 2
-                    Log.v(TAG, "Captured packet: $size bytes")
+                    packetsCaptured++
+                    processPacket(packetBuffer.array(), size)
                 }
                 packetBuffer.clear()
             }
@@ -120,6 +140,85 @@ class RadarVpnService : VpnService() {
         }
     }
 
+    /**
+     * Process a captured packet
+     */
+    private fun processPacket(data: ByteArray, size: Int) {
+        try {
+            // Parse IP header to find UDP packets
+            if (size < 20) return // Minimum IP header size
+            
+            val ipVersion = (data[0].toInt() shr 4) and 0x0F
+            if (ipVersion != 4) return // Only IPv4 for now
+            
+            val ipHeaderLength = (data[0].toInt() and 0x0F) * 4
+            val protocol = data[9].toInt() and 0xFF
+            
+            // Check if UDP
+            if (protocol != 17) return
+            
+            // Parse UDP header
+            if (size < ipHeaderLength + 8) return
+            
+            val srcPort = ((data[ipHeaderLength].toInt() and 0xFF) shl 8) or (data[ipHeaderLength + 1].toInt() and 0xFF)
+            val dstPort = ((data[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or (data[ipHeaderLength + 3].toInt() and 0xFF)
+            
+            // Check if this is Albion traffic (port 5056)
+            if (srcPort != ALBION_PORT && dstPort != ALBION_PORT) return
+            
+            // Extract UDP payload
+            val udpPayloadStart = ipHeaderLength + 8
+            if (size <= udpPayloadStart) return
+            
+            val payload = data.copyOfRange(udpPayloadStart, size)
+            
+            // Parse Photon packet
+            val photonPacket = photonParser.parsePacket(payload, payload.size)
+            if (photonPacket != null) {
+                processPhotonPacket(photonPacket)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing packet: ${e.message}")
+        }
+    }
+
+    /**
+     * Process a parsed Photon packet
+     */
+    private fun processPhotonPacket(packet: PhotonParser.PhotonPacket) {
+        for (command in packet.commands) {
+            if (command.commandType == PhotonProtocol.COMMAND_RELIABLE ||
+                command.commandType == PhotonProtocol.COMMAND_UNRELIABLE) {
+                
+                val event = photonParser.parseEvent(command.data)
+                if (event != null) {
+                    eventsProcessed++
+                    
+                    // Log all events for discovery
+                    discoveryLogger.logParsedEvent(event.eventCode, event.parameters)
+                    
+                    // Process event
+                    val entity = eventHandler.processEvent(event)
+                    if (entity != null) {
+                        // Post entity update to EventBus
+                        EventBus.getDefault().post(EntityUpdateEvent(entity))
+                        
+                        // Log unknown entities
+                        if (entity.uniqueName == null || entity.typeId == 0) {
+                            discoveryLogger.logUnknownEntity(entity)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Entity update event for EventBus
+     */
+    data class EntityUpdateEvent(val entity: GameEntity)
+
     private fun stopVpn() {
         Log.d(TAG, "Stopping VPN...")
         isRunning = false
@@ -127,6 +226,11 @@ class RadarVpnService : VpnService() {
         vpnThread = null
         vpnInterface?.close()
         vpnInterface = null
+        
+        // Clear entities
+        eventHandler.clear()
+        
+        Log.d(TAG, "Stats: $packetsCaptured packets, $eventsProcessed events")
     }
 
     private fun createNotification(): Notification {
