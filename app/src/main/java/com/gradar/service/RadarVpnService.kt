@@ -12,8 +12,8 @@ import com.gradar.R
 import com.gradar.handler.EventHandler
 import com.gradar.logger.DiscoveryLogger
 import com.gradar.model.GameEntity
-import com.gradar.protocol.PhotonProtocol
 import com.gradar.protocol.PhotonParser
+import com.gradar.protocol.PhotonProtocol
 import org.greenrobot.eventbus.EventBus
 import java.io.FileInputStream
 import java.nio.ByteBuffer
