@@ -4,29 +4,25 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     
-    <!-- Radar circle -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#00FF88"
+        android:strokeColor="#FFFFFF"
         android:strokeWidth="2"
         android:pathData="M54,54m-40,0a40,40,0,1,1,80,0a40,40,0,1,1,-80,0"/>
     
-    <!-- Inner circle -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#00FF88"
+        android:strokeColor="#FFFFFF"
         android:strokeWidth="1"
         android:pathData="M54,54m-25,0a25,25,0,1,1,50,0a25,25,0,1,1,-50,0"/>
     
-    <!-- Center dot -->
     <path
-        android:fillColor="#00FF88"
+        android:fillColor="#FFFFFF"
         android:pathData="M54,54m-4,0a4,4,0,1,1,8,0a4,4,0,1,1,-8,0"/>
     
-    <!-- Radar sweep line -->
     <path
-        android:fillColor="#00FF88"
+        android:fillColor="#FFFFFF"
         android:fillAlpha="0.3"
         android:pathData="M54,54 L54,14 A40,40 0 0,1 82,30 Z"/>
-    
+
 </vector>
