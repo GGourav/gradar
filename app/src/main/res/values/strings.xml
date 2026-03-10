@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App Info -->
+    <string name="app_name">G Radar</string>
+    <string name="subtitle_radar_for_albion">Radar Overlay for Albion Online</string>
+    
+    <!-- Buttons -->
+    <string name="start_radar">Start Radar</string>
+    <string name="stop_radar">Stop Radar</string>
+    <string name="settings">Settings</string>
+    
+    <!-- Status -->
+    <string name="vpn_status">VPN Status</string>
+    <string name="vpn_connected">Connected</string>
+    <string name="vpn_disconnected">Disconnected</string>
+    <string name="overlay_permission">Overlay Permission</string>
+    <string name="overlay_permission_granted">Granted</string>
+    <string name="overlay_permission_required">Required</string>
+    
+    <!-- Permissions -->
+    <string name="vpn_permission_denied">VPN permission denied. Cannot capture packets.</string>
+    <string name="overlay_permission_denied">Overlay permission denied. Cannot show radar.</string>
+    
+    <!-- Notifications -->
+    <string name="channel_vpn_service">VPN Service</string>
+    <string name="channel_vpn_service_desc">Required for packet capture</string>
+    <string name="channel_overlay_service">Radar Overlay</string>
+    <string name="channel_overlay_service_desc">Displays radar on screen</string>
+    <string name="notification_vpn_title">G Radar Active</string>
+    <string name="notification_vpn_text">Capturing Albion Online traffic</string>
+    <string name="notification_overlay_title">Radar Overlay</string>
+    <string name="notification_overlay_text">Tap to open settings</string>
+    
+    <!-- VPN Session -->
+    <string name="vpn_session_name">G Radar VPN</string>
+    
+    <!-- Messages -->
+    <string name="radar_started">Radar started successfully</string>
+    <string name="radar_stopped">Radar stopped</string>
+    
+    <!-- Version -->
+    <string name="version_placeholder">Version 1.0.0 (1)</string>
+    <string name="version_format">Version %s (%d)</string>
+</resources>
