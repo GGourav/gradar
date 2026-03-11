@@ -3,15 +3,11 @@ package com.gradar.service
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.Intent
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.PixelFormat
+import android.graphics.*
 import android.os.Build
 import android.view.Gravity
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.View
 import android.widget.FrameLayout
 import com.gradar.GRadarApp
 import com.gradar.MainActivity
@@ -23,7 +19,7 @@ import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
 
 /**
- * Overlay Service for displaying the radar
+ * Overlay Service - Full radar rendering with all entity types
  */
 class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
 
@@ -32,7 +28,7 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
         const val ACTION_START = "com.gradar.action.OVERLAY_START"
         const val ACTION_STOP = "com.gradar.action.OVERLAY_STOP"
         const val NOTIFICATION_ID = 1002
-        const val DEFAULT_RADAR_SIZE = 300
+        var radarSize = 300
     }
 
     private var windowManager: android.view.WindowManager? = null
@@ -40,30 +36,34 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
     private var surfaceView: SurfaceView? = null
     private var isShowing = false
     
-    // Entity tracking
     private val entities = mutableMapOf<Long, GameEntity>()
     private var playerX: Float = 0f
     private var playerY: Float = 0f
     
-    // Rendering
     private var renderThread: Thread? = null
     private var isRendering = false
     
-    // Paint objects
+    // Paints
     private val backgroundPaint = Paint().apply {
-        color = Color.argb(180, 0, 0, 0)
+        color = Color.argb(200, 10, 15, 25)
         style = Paint.Style.FILL
     }
     
+    private val borderPaint = Paint().apply {
+        color = Color.argb(100, 0, 255, 136)
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        isAntiAlias = true
+    }
+    
     private val gridPaint = Paint().apply {
-        color = Color.argb(60, 0, 255, 136)
+        color = Color.argb(40, 0, 255, 136)
         style = Paint.Style.STROKE
         strokeWidth = 1f
         isAntiAlias = true
     }
     
-    private val playerPaint = Paint().apply {
-        color = Color.WHITE
+    private val sweepPaint = Paint().apply {
         style = Paint.Style.FILL
         isAntiAlias = true
     }
@@ -72,7 +72,37 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
         color = Color.WHITE
         textSize = 10f
         isAntiAlias = true
+        typeface = Typeface.MONOSPACE
     }
+    
+    private val playerPaint = Paint().apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    // Entity paints
+    private val resourcePaint = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mobPaint = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val bossPaint = Paint().apply { color = Color.rgb(255, 136, 0); style = Paint.Style.FILL; isAntiAlias = true }
+    private val enchantedMobPaint = Paint().apply { color = Color.rgb(170, 68, 255); style = Paint.Style.FILL; isAntiAlias = true }
+    private val playerDotPaint = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val hostilePlayerPaint = Paint().apply { color = Color.RED; style = Paint.Style.FILL; isAntiAlias = true }
+    private val mistPaint = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val dungeonPaint = Paint().apply { color = Color.rgb(128, 0, 128); style = Paint.Style.FILL; isAntiAlias = true }
+    private val chestPaint = Paint().apply { color = Color.rgb(255, 215, 0); style = Paint.Style.FILL; isAntiAlias = true }
+    private val fishingPaint = Paint().apply { color = Color.CYAN; style = Paint.Style.FILL; isAntiAlias = true }
+
+    // Enchant ring colors
+    private val enchantColors = listOf(
+        Color.GREEN,        // .0 - Green
+        Color.GREEN,        // .1 - Green
+        Color.rgb(0, 100, 255), // .2 - Dark Blue
+        Color.rgb(170, 68, 255), // .3 - Purple
+        Color.rgb(255, 215, 0)   // .4 - Gold
+    )
+    
+    private var sweepAngle = 0f
 
     override fun onCreate() {
         super.onCreate()
@@ -109,8 +139,8 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
         ))
         
         val layoutParams = android.view.WindowManager.LayoutParams(
-            DEFAULT_RADAR_SIZE,
-            DEFAULT_RADAR_SIZE,
+            radarSize,
+            radarSize,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             } else {
@@ -130,7 +160,7 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
         try {
             windowManager?.addView(containerLayout, layoutParams)
             isShowing = true
-            android.util.Log.d(TAG, "Overlay shown successfully")
+            android.util.Log.d(TAG, "Overlay shown")
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Failed to show overlay: ${e.message}")
         }
@@ -140,9 +170,7 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
         startRendering(holder)
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        // Not needed
-    }
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         stopRendering()
@@ -158,7 +186,8 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
                         drawRadar(canvas)
                         holder.unlockCanvasAndPost(canvas)
                     }
-                    Thread.sleep(33) // ~30 FPS
+                    sweepAngle = (sweepAngle + 2) % 360
+                    Thread.sleep(33)
                 } catch (e: Exception) {
                     android.util.Log.e(TAG, "Render error: ${e.message}")
                 }
@@ -179,73 +208,130 @@ class RadarOverlayService : android.app.Service(), SurfaceHolder.Callback {
         val centerY = height / 2
         val radius = minOf(width, height) / 2 - 10
 
-        // Draw background
+        // Background
         canvas.drawCircle(centerX, centerY, radius, backgroundPaint)
+        canvas.drawCircle(centerX, centerY, radius, borderPaint)
 
-        // Draw grid rings
+        // Grid rings
         canvas.drawCircle(centerX, centerY, radius * 0.33f, gridPaint)
         canvas.drawCircle(centerX, centerY, radius * 0.66f, gridPaint)
-        canvas.drawCircle(centerX, centerY, radius, gridPaint)
 
-        // Draw cross
+        // Cross
         canvas.drawLine(centerX - radius, centerY, centerX + radius, centerY, gridPaint)
         canvas.drawLine(centerX, centerY - radius, centerX, centerY + radius, gridPaint)
+
+        // Sweep effect
+        sweepPaint.shader = SweepGradient(centerX, centerY, 
+            intArrayOf(Color.TRANSPARENT, Color.argb(50, 0, 255, 136), Color.TRANSPARENT),
+            null)
+        canvas.save()
+        canvas.rotate(sweepAngle, centerX, centerY)
+        canvas.drawArc(
+            RectF(centerX - radius, centerY - radius, centerX + radius, centerY + radius),
+            0f, 30f, true, sweepPaint
+        )
+        canvas.restore()
 
         // Draw entities
         synchronized(entities) {
             for (entity in entities.values) {
-                val dx = (entity.posX - playerX) / 50f // Scale factor
-                val dy = (entity.posY - playerY) / 50f
-                
-                val x = centerX + dx.coerceIn(-radius, radius)
-                val y = centerY + dy.coerceIn(-radius, radius)
-                
-                val paint = getEntityPaint(entity)
-                canvas.drawCircle(x, y, 5f, paint)
+                drawEntity(canvas, entity, centerX, centerY, radius)
             }
         }
 
-        // Draw player (center)
+        // Player (center)
         canvas.drawCircle(centerX, centerY, 6f, playerPaint)
         
-        // Draw entity count
+        // Stats
+        textPaint.color = Color.WHITE
         canvas.drawText("Entities: ${entities.size}", 10f, 20f, textPaint)
     }
 
-    private fun getEntityPaint(entity: GameEntity): Paint {
-        val paint = Paint()
-        paint.style = Paint.Style.FILL
-        paint.isAntiAlias = true
+    private fun drawEntity(canvas: Canvas, entity: GameEntity, centerX: Float, centerY: Float, radius: Float) {
+        val scale = 50f
+        val dx = (entity.posX - playerX) / scale
+        val dy = (entity.posY - playerY) / scale
         
-        when {
+        val x = centerX + dx.coerceIn(-radius + 5, radius - 5)
+        val y = centerY + dy.coerceIn(-radius + 5, radius - 5)
+
+        val paint = getEntityPaint(entity)
+        val dotSize = when {
+            entity.isBoss() -> 8f
+            entity.isPlayer() -> 5f
+            else -> 5f
+        }
+        
+        // Draw dot
+        canvas.drawCircle(x, y, dotSize, paint)
+        
+        // Draw enchant ring for resources/mobs
+        if (entity.isEnchanted() && (entity.isResource() || entity.isMob())) {
+            val ringPaint = Paint().apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 2f
+                isAntiAlias = true
+                color = enchantColors.getOrElse(entity.getEnchantColor()) { Color.GREEN }
+            }
+            canvas.drawCircle(x, y, dotSize + 3, ringPaint)
+        }
+        
+        // Diamond shape for mists
+        if (entity.isMist()) {
+            val path = Path()
+            path.moveTo(x, y - 6)
+            path.lineTo(x + 5, y)
+            path.lineTo(x, y + 6)
+            path.lineTo(x - 5, y)
+            path.close()
+            canvas.drawPath(path, paint)
+        }
+    }
+
+    private fun getEntityPaint(entity: GameEntity): Paint {
+        return when {
             entity.isResource() -> {
-                // Blue for resources
-                paint.color = when (entity.tier) {
-                    in 1..3 -> Color.rgb(100, 150, 255)
-                    in 4..5 -> Color.rgb(70, 130, 255)
-                    in 6..7 -> Color.rgb(50, 100, 255)
-                    else -> Color.rgb(30, 70, 255)
+                resourcePaint.color = when {
+                    entity.tier >= 8 -> Color.rgb(255, 100, 100)  // Red T8
+                    entity.tier >= 6 -> Color.rgb(100, 150, 255)  // Blue T6-T7
+                    entity.tier >= 4 -> Color.rgb(100, 200, 255)  // Light blue T4-T5
+                    else -> Color.rgb(68, 136, 255)               // Blue T1-T3
                 }
+                resourcePaint
             }
             entity.isMob() -> {
                 when {
-                    entity.isBoss() -> paint.color = Color.rgb(255, 136, 0) // Orange
-                    entity.isEnchanted() -> paint.color = Color.rgb(170, 68, 255) // Purple
-                    else -> paint.color = Color.rgb(68, 255, 68) // Green
+                    entity.isBoss() -> bossPaint
+                    entity.isEnchanted() -> enchantedMobPaint
+                    else -> {
+                        mobPaint.color = Color.rgb(68, 255, 68)
+                        mobPaint
+                    }
                 }
             }
             entity.isPlayer() -> {
-                paint.color = Color.WHITE // White for players
+                playerDotPaint.color = if (entity.isHostile) Color.RED else Color.WHITE
+                playerDotPaint
             }
             entity.isMist() -> {
-                paint.color = Color.rgb(0, 255, 200) // Cyan for mists
+                mistPaint.color = when (entity.rarity) {
+                    0 -> Color.WHITE          // Common
+                    1 -> Color.GREEN          // Uncommon
+                    2 -> Color.BLUE           // Rare
+                    3 -> Color.rgb(170, 68, 255)  // Legendary
+                    4 -> Color.rgb(255, 215, 0)   // Epic
+                    else -> Color.CYAN
+                }
+                mistPaint
             }
+            entity.isDungeon() -> dungeonPaint
+            entity.isChest() -> chestPaint
+            entity.isFishing() -> fishingPaint
             else -> {
-                paint.color = Color.GRAY
+                mobPaint.color = Color.GRAY
+                mobPaint
             }
         }
-        
-        return paint
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
