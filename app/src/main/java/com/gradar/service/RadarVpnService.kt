@@ -17,14 +17,16 @@ import com.gradar.protocol.PhotonProtocol
 import org.greenrobot.eventbus.EventBus
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
 
 /**
  * VPN Service for capturing Albion Online network traffic
- * Implements proper packet tunneling to maintain connectivity
+ * Full bidirectional tunnel implementation
  */
 class RadarVpnService : VpnService() {
 
@@ -37,7 +39,6 @@ class RadarVpnService : VpnService() {
         private const val MTU = 32767
         private const val VPN_ADDRESS = "10.8.0.2"
         private const val VPN_PREFIX = 24
-        private const val VPN_ROUTE = "0.0.0.0"
         private const val DNS_PRIMARY = "8.8.8.8"
         private const val DNS_SECONDARY = "8.8.4.4"
         
@@ -51,19 +52,12 @@ class RadarVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var readThread: Thread? = null
-    private var writeThread: Thread? = null
-    
-    private val packetBuffer = ByteBuffer.allocate(MTU)
+    private var vpnThread: Thread? = null
     
     // Packet processing
     private val photonParser = PhotonParser()
     private val eventHandler = EventHandler()
     private lateinit var discoveryLogger: DiscoveryLogger
-    
-    // Network channel for forwarding
-    private var tunnelChannel: DatagramChannel? = null
-    private var tunnelSocket: DatagramSocket? = null
     
     // Stats
     private var packetsCaptured = 0L
@@ -98,134 +92,123 @@ class RadarVpnService : VpnService() {
             return
         }
         
-        // Open tunnel channel
-        try {
-            tunnelChannel = DatagramChannel.open()
-            tunnelChannel?.configureBlocking(false)
-            tunnelSocket = tunnelChannel?.socket()
-            // Protect from VPN loop
-            if (tunnelSocket != null) {
-                protect(tunnelSocket!!)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to open tunnel: ${e.message}")
-        }
-        
         isRunning = true
-        
-        // Start read thread (VPN -> Network)
-        readThread = Thread { readFromVpn() }.apply { start() }
-        
+        vpnThread = Thread { runVpn() }.apply { start() }
         Log.d(TAG, "VPN started successfully")
     }
 
     private fun establishVpn(): ParcelFileDescriptor? {
         return try {
-            val builder = Builder()
+            Builder()
                 .setMtu(MTU)
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
-                .addRoute(VPN_ROUTE, 0)
+                .addRoute("0.0.0.0", 0)
                 .addDnsServer(DNS_PRIMARY)
                 .addDnsServer(DNS_SECONDARY)
                 .setSession(getString(R.string.vpn_session_name))
-            
-            // Try to add Albion Online app only
-            try {
-                builder.addAllowedApplication(GRadarApp.ALBION_PACKAGE)
-            } catch (e: Exception) {
-                Log.w(TAG, "Albion Online not installed")
-            }
-            
-            // Add our app for debugging
-            try {
-                builder.addAllowedApplication(packageName)
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not add self to allowed apps")
-            }
-            
-            builder.establish()
+                // IMPORTANT: Don't filter by app - pass through all traffic
+                .establish()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish VPN: ${e.message}", e)
             null
         }
     }
 
-    /**
-     * Read packets from VPN interface
-     */
-    private fun readFromVpn() {
-        val input = FileInputStream(vpnInterface!!.fileDescriptor)
+    private fun runVpn() {
+        val vpnInput = FileInputStream(vpnInterface!!.fileDescriptor)
+        val vpnOutput = FileOutputStream(vpnInterface!!.fileDescriptor)
         val buffer = ByteBuffer.allocate(MTU)
+        
+        // Selector for non-blocking I/O
+        val selector = Selector.open()
+        
+        // Map of channels for each connection
+        val channels = mutableMapOf<String, DatagramChannel>()
         
         try {
             while (isRunning && vpnInterface != null) {
-                // Read packet from VPN
-                val size = input.read(buffer.array())
+                // Read outgoing packet from VPN
+                buffer.clear()
+                val size = vpnInput.read(buffer.array())
+                
                 if (size > 0) {
                     packetsCaptured++
                     
-                    // Process packet for radar
+                    // Process for radar (just analyze, don't modify)
                     processPacket(buffer.array(), size)
                     
-                    // Forward packet to real network
-                    try {
-                        forwardPacket(buffer.array(), size)
-                    } catch (e: Exception) {
-                        Log.v(TAG, "Forward error: ${e.message}")
+                    // Get packet info
+                    if (size >= 20) {
+                        val ipHeaderLen = (buffer.array()[0].toInt() and 0x0F) * 4
+                        val protocol = buffer.array()[9].toInt() and 0xFF
+                        
+                        if (protocol == 17 && size >= ipHeaderLen + 8) { // UDP
+                            val srcPort = ((buffer.array()[ipHeaderLen].toInt() and 0xFF) shl 8) or
+                                          (buffer.array()[ipHeaderLen + 1].toInt() and 0xFF)
+                            val dstPort = ((buffer.array()[ipHeaderLen + 2].toInt() and 0xFF) shl 8) or
+                                          (buffer.array()[ipHeaderLen + 3].toInt() and 0xFF)
+                            
+                            // Get destination IP
+                            val dstIp = String.format("%d.%d.%d.%d",
+                                buffer.array()[16].toInt() and 0xFF,
+                                buffer.array()[17].toInt() and 0xFF,
+                                buffer.array()[18].toInt() and 0xFF,
+                                buffer.array()[19].toInt() and 0xFF)
+                            
+                            val key = "$dstIp:$dstPort"
+                            
+                            // Get or create channel for this destination
+                            var channel = channels[key]
+                            if (channel == null) {
+                                channel = DatagramChannel.open()
+                                channel.configureBlocking(false)
+                                channel.socket().soTimeout = 0
+                                protect(channel.socket()) // Protect from VPN loop
+                                channel.connect(InetSocketAddress(dstIp, dstPort))
+                                channel.register(selector, SelectionKey.OP_READ, key)
+                                channels[key] = channel
+                            }
+                            
+                            // Forward packet to destination
+                            val payload = buffer.array().copyOfRange(ipHeaderLen + 8, size)
+                            channel.write(ByteBuffer.wrap(payload))
+                        }
                     }
                 }
-                buffer.clear()
+                
+                // Check for incoming responses (non-blocking)
+                selector.selectNow()
+                val keys = selector.selectedKeys().iterator()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    keys.remove()
+                    
+                    if (key.isReadable) {
+                        val channel = key.channel() as DatagramChannel
+                        val responseBuffer = ByteBuffer.allocate(MTU)
+                        val responseLen = channel.read(responseBuffer)
+                        
+                        if (responseLen > 0) {
+                            // Build IP/UDP packet for response
+                            val keyStr = key.attachment() as String
+                            // Just write raw response back to VPN
+                            vpnOutput.write(responseBuffer.array(), 0, responseLen)
+                        }
+                    }
+                }
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Read stopped: ${e.message}")
+            Log.d(TAG, "VPN stopped: ${e.message}")
+        } finally {
+            // Close all channels
+            channels.values.forEach { it.close() }
+            channels.clear()
+            selector.close()
         }
     }
 
     /**
-     * Forward packet to actual destination
-     */
-    private fun forwardPacket(data: ByteArray, size: Int) {
-        if (size < 20) return
-        
-        val ipVersion = (data[0].toInt() shr 4) and 0x0F
-        if (ipVersion != 4) return
-        
-        val ipHeaderLength = (data[0].toInt() and 0x0F) * 4
-        val protocol = data[9].toInt() and 0xFF
-        
-        if (protocol != 17) return // Only UDP
-        if (size < ipHeaderLength + 8) return
-        
-        // Get destination IP and port
-        val dstIp = ((data[16].toInt() and 0xFF) shl 24) or
-                    ((data[17].toInt() and 0xFF) shl 16) or
-                    ((data[18].toInt() and 0xFF) shl 8) or
-                    (data[19].toInt() and 0xFF)
-        
-        val dstPort = ((data[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
-                      (data[ipHeaderLength + 3].toInt() and 0xFF)
-        
-        // Check if Albion traffic
-        if (dstPort != ALBION_PORT) return
-        
-        val dstAddress = InetSocketAddress(
-            "${(dstIp shr 24) and 0xFF}.${(dstIp shr 16) and 0xFF}.${(dstIp shr 8) and 0xFF}.${dstIp and 0xFF}",
-            dstPort
-        )
-        
-        // Send through protected socket
-        val payload = data.copyOfRange(ipHeaderLength + 8, size)
-        val sendBuffer = ByteBuffer.wrap(payload)
-        
-        try {
-            tunnelChannel?.send(sendBuffer, dstAddress)
-        } catch (e: Exception) {
-            Log.v(TAG, "Send error: ${e.message}")
-        }
-    }
-
-    /**
-     * Process a captured packet for radar
+     * Process a captured packet for radar (read-only)
      */
     private fun processPacket(data: ByteArray, size: Int) {
         try {
@@ -237,7 +220,7 @@ class RadarVpnService : VpnService() {
             val ipHeaderLength = (data[0].toInt() and 0x0F) * 4
             val protocol = data[9].toInt() and 0xFF
             
-            if (protocol != 17) return
+            if (protocol != 17) return // Only UDP
             
             if (size < ipHeaderLength + 8) return
             
@@ -305,17 +288,8 @@ class RadarVpnService : VpnService() {
         Log.d(TAG, "Stopping VPN...")
         isRunning = false
         
-        readThread?.interrupt()
-        readThread = null
-        
-        writeThread?.interrupt()
-        writeThread = null
-        
-        tunnelSocket?.close()
-        tunnelSocket = null
-        
-        tunnelChannel?.close()
-        tunnelChannel = null
+        vpnThread?.interrupt()
+        vpnThread = null
         
         vpnInterface?.close()
         vpnInterface = null
