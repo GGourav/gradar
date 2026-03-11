@@ -16,41 +16,44 @@ data class GameEntity(
     var health: Int = 100,
     var maxHealth: Int = 100,
     val entityType: Int = PhotonProtocol.EntityType.UNKNOWN,
+    var rarity: Int = 0,
+    var playerName: String? = null,
+    var guildName: String? = null,
+    var alliance: String? = null,
+    var faction: Int = 0,
+    var isHostile: Boolean = false,
     var lastUpdate: Long = System.currentTimeMillis()
 ) {
     
-    /**
-     * Check if entity is a resource
-     */
     fun isResource(): Boolean {
         return entityType == PhotonProtocol.EntityType.RESOURCE ||
                entityType == PhotonProtocol.EntityType.HARVESTABLE
     }
     
-    /**
-     * Check if entity is a mob
-     */
     fun isMob(): Boolean {
         return entityType == PhotonProtocol.EntityType.MOB
     }
     
-    /**
-     * Check if entity is a player
-     */
     fun isPlayer(): Boolean {
         return entityType == PhotonProtocol.EntityType.PLAYER
     }
     
-    /**
-     * Check if entity is a mist
-     */
     fun isMist(): Boolean {
         return entityType == PhotonProtocol.EntityType.MIST
     }
     
-    /**
-     * Get tier display string (e.g., "T4", "T6.2")
-     */
+    fun isDungeon(): Boolean {
+        return entityType == PhotonProtocol.EntityType.DUNGEON
+    }
+    
+    fun isChest(): Boolean {
+        return entityType == PhotonProtocol.EntityType.CHEST
+    }
+    
+    fun isFishing(): Boolean {
+        return entityType == PhotonProtocol.EntityType.FISHING
+    }
+    
     fun getTierString(): String {
         return if (enchantment > 0) {
             "T$tier.$enchantment"
@@ -59,17 +62,33 @@ data class GameEntity(
         }
     }
     
-    /**
-     * Check if entity is enchanted
-     */
     fun isEnchanted(): Boolean = enchantment > 0
     
-    /**
-     * Check if entity is a boss
-     */
     fun isBoss(): Boolean {
-        return uniqueName?.contains("BOSS", ignoreCase = true) == true ||
-               uniqueName?.contains("_CHEST_", ignoreCase = true) == true ||
-               uniqueName?.contains("ABYSS", ignoreCase = true) == true
+        val name = uniqueName?.uppercase() ?: return false
+        return name.contains("BOSS") ||
+               name.contains("_CHEST_") ||
+               name.contains("ABYSS") ||
+               name.contains("HELLGATE") ||
+               name.contains("COMMANDER") ||
+               name.contains("ARTHUR") ||
+               name.contains("MERLIN") ||
+               name.contains("MORGANA")
     }
+    
+    fun getResourceType(): String {
+        val name = uniqueName?.uppercase() ?: return PhotonProtocol.ResourceType.UNKNOWN
+        return when {
+            name.contains("ORE") || name.contains("_ORE_") -> PhotonProtocol.ResourceType.ORE
+            name.contains("ROCK") || name.contains("_ROCK_") -> PhotonProtocol.ResourceType.ROCK
+            name.contains("WOOD") || name.contains("LOG") || name.contains("_WOOD_") -> PhotonProtocol.ResourceType.WOOD
+            name.contains("HIDE") || name.contains("_HIDE_") -> PhotonProtocol.ResourceType.HIDE
+            name.contains("FIBER") || name.contains("_FIBER_") -> PhotonProtocol.ResourceType.FIBER
+            else -> PhotonProtocol.ResourceType.UNKNOWN
+        }
+    }
+    
+    fun getMistRarity(): Int = rarity
+    
+    fun getEnchantColor(): Int = enchantment.coerceIn(0, 4)
 }
