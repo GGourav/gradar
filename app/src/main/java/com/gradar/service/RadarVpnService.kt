@@ -21,7 +21,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * VPN Service for capturing Albion Online network traffic
- * Implements full NAT forwarding to allow game traffic while capturing packets
  */
 class RadarVpnService : VpnService() {
 
@@ -83,18 +82,11 @@ class RadarVpnService : VpnService() {
         }
 
         isRunning = true
-
-        // Clear any previous state
         NatSessionManager.clearAllSessions()
         EntityProcessor.clearAll()
 
-        // Start VPN read thread (captures packets from apps)
         vpnReadThread = Thread({ readFromVpn() }, "VPN-Read").apply { start() }
-
-        // Start VPN write thread (writes responses back to apps)
         vpnWriteThread = Thread({ writeToVpn() }, "VPN-Write").apply { start() }
-
-        // Start tunnel check thread (reads responses from servers)
         tunnelCheckThread = Thread({ checkTunnels() }, "Tunnel-Check").apply { start() }
 
         Log.d(TAG, "VPN started successfully")
@@ -109,7 +101,6 @@ class RadarVpnService : VpnService() {
                 .addDnsServer("8.8.8.8")
                 .addDnsServer("8.8.4.4")
                 .apply {
-                    // Only capture Albion traffic
                     try {
                         addAllowedApplication(GRadarApp.ALBION_PACKAGE)
                     } catch (e: Exception) {
@@ -124,9 +115,6 @@ class RadarVpnService : VpnService() {
         }
     }
 
-    /**
-     * Read packets from VPN interface (from apps)
-     */
     private fun readFromVpn() {
         val input = FileInputStream(vpnInterface?.fileDescriptor)
         val buffer = ByteBuffer.allocate(MTU)
@@ -142,7 +130,7 @@ class RadarVpnService : VpnService() {
                     buffer.limit(size)
 
                     try {
-                        val packet = Packet(buffer)
+                        val packet = Packet.fromBuffer(buffer)
                         packetsRead++
 
                         when {
@@ -162,19 +150,14 @@ class RadarVpnService : VpnService() {
         Log.d(TAG, "VPN read thread ended, total packets: $packetsRead")
     }
 
-    /**
-     * Process UDP packet - forward to real server via tunnel
-     */
     private fun processUdpPacket(packet: Packet) {
         val destPort = packet.udpHeader?.destinationPort ?: return
         val srcPort = packet.udpHeader?.sourcePort ?: return
 
-        // Get or create tunnel for this source port
         val portKey = srcPort.toShort()
         var tunnel = udpTunnels[portKey]
 
         if (tunnel == null) {
-            // Create new tunnel
             val remoteIP = packet.ip4Header.destinationAddress?.address?.let {
                 var ip = 0
                 for (i in 0..3) {
@@ -185,33 +168,23 @@ class RadarVpnService : VpnService() {
 
             val remotePort = destPort.toShort()
 
-            // Create NAT session
             NatSessionManager.createSession(portKey, remoteIP, remotePort, "UDP")
 
-            // Create tunnel
             tunnel = UdpTunnel(this, outputQueue, packet, portKey)
             udpTunnels[portKey] = tunnel
 
-            // Initialize connection
             tunnel.initConnection()
 
             Log.d(TAG, "Created UDP tunnel for port $srcPort -> $destPort")
         } else {
-            // Forward packet through existing tunnel
             tunnel.processPacket(packet)
         }
     }
 
-    /**
-     * Process TCP packet - for now, we ignore TCP
-     */
     private fun processTcpPacket(packet: Packet) {
         // TCP not used by Albion game protocol
     }
 
-    /**
-     * Write packets back to VPN interface (to apps)
-     */
     private fun writeToVpn() {
         val output = FileOutputStream(vpnInterface?.fileDescriptor)
 
@@ -235,9 +208,6 @@ class RadarVpnService : VpnService() {
         Log.d(TAG, "VPN write thread ended, total packets: $packetsWritten")
     }
 
-    /**
-     * Check tunnels for incoming data from servers
-     */
     private fun checkTunnels() {
         Log.d(TAG, "Tunnel check thread started")
 
