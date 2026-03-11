@@ -6,7 +6,15 @@ import java.nio.ByteBuffer
 /**
  * IP Packet representation with TCP/UDP header parsing
  */
-class Packet(buffer: ByteBuffer) {
+class Packet private constructor(
+    var ip4Header: IP4Header,
+    var tcpHeader: TCPHeader?,
+    var udpHeader: UDPHeader?,
+    var backingBuffer: ByteBuffer,
+    var isTCP: Boolean,
+    var isUDP: Boolean,
+    var payloadSize: Int
+) {
 
     companion object {
         const val IP4_HEADER_SIZE = 20
@@ -14,49 +22,40 @@ class Packet(buffer: ByteBuffer) {
         const val UDP_HEADER_SIZE = 8
         const val PROTOCOL_TCP: Byte = 6
         const val PROTOCOL_UDP: Byte = 17
-    }
 
-    var ip4Header: IP4Header
-    var tcpHeader: TCPHeader? = null
-    var udpHeader: UDPHeader? = null
-    var backingBuffer: ByteBuffer
-    var isTCP: Boolean = false
-        private set
-    var isUDP: Boolean = false
-        private set
-    var payloadSize: Int = 0
-        private set
+        fun fromBuffer(buffer: ByteBuffer): Packet {
+            val ip4Header = IP4Header(buffer)
+            var tcpHeader: TCPHeader? = null
+            var udpHeader: UDPHeader? = null
+            var isTCP = false
+            var isUDP = false
 
-    init {
-        ip4Header = IP4Header(buffer)
-
-        when (ip4Header.protocol) {
-            PROTOCOL_TCP -> {
-                tcpHeader = TCPHeader(buffer)
-                isTCP = true
+            when (ip4Header.protocol) {
+                PROTOCOL_TCP -> {
+                    tcpHeader = TCPHeader(buffer)
+                    isTCP = true
+                }
+                PROTOCOL_UDP -> {
+                    udpHeader = UDPHeader(buffer)
+                    isUDP = true
+                }
             }
-            PROTOCOL_UDP -> {
-                udpHeader = UDPHeader(buffer)
-                isUDP = true
-            }
+
+            val payloadSize = buffer.limit() - buffer.position()
+            return Packet(ip4Header, tcpHeader, udpHeader, buffer, isTCP, isUDP, payloadSize)
         }
-
-        backingBuffer = buffer
-        payloadSize = buffer.limit() - buffer.position()
     }
-
-    private constructor()
 
     fun duplicate(): Packet {
-        val packet = Packet()
-        packet.ip4Header = ip4Header.duplicate()
-        tcpHeader?.let { packet.tcpHeader = it.duplicate() }
-        udpHeader?.let { packet.udpHeader = it.duplicate() }
-        packet.isTCP = isTCP
-        packet.isUDP = isUDP
-        packet.backingBuffer = backingBuffer.duplicate()
-        packet.payloadSize = payloadSize
-        return packet
+        return Packet(
+            ip4Header.duplicate(),
+            tcpHeader?.duplicate(),
+            udpHeader?.duplicate(),
+            backingBuffer.duplicate(),
+            isTCP,
+            isUDP,
+            payloadSize
+        )
     }
 
     fun swapSourceAndDestination() {
