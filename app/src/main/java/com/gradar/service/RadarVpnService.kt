@@ -17,7 +17,6 @@ import com.gradar.protocol.PhotonProtocol
 import org.greenrobot.eventbus.EventBus
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
@@ -106,7 +105,6 @@ class RadarVpnService : VpnService() {
                 .addDnsServer(DNS_PRIMARY)
                 .addDnsServer(DNS_SECONDARY)
                 .setSession(getString(R.string.vpn_session_name))
-                // IMPORTANT: Don't filter by app - pass through all traffic
                 .establish()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish VPN: ${e.message}", e)
@@ -160,18 +158,25 @@ class RadarVpnService : VpnService() {
                             // Get or create channel for this destination
                             var channel = channels[key]
                             if (channel == null) {
-                                channel = DatagramChannel.open()
-                                channel.configureBlocking(false)
-                                channel.socket().soTimeout = 0
-                                protect(channel.socket()) // Protect from VPN loop
-                                channel.connect(InetSocketAddress(dstIp, dstPort))
-                                channel.register(selector, SelectionKey.OP_READ, key)
-                                channels[key] = channel
+                                try {
+                                    val newChannel = DatagramChannel.open()
+                                    newChannel.configureBlocking(false)
+                                    newChannel.socket().soTimeout = 0
+                                    protect(newChannel.socket())
+                                    newChannel.connect(InetSocketAddress(dstIp, dstPort))
+                                    newChannel.register(selector, SelectionKey.OP_READ, key)
+                                    channels[key] = newChannel
+                                    channel = newChannel
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Failed to create channel: ${e.message}")
+                                }
                             }
                             
                             // Forward packet to destination
-                            val payload = buffer.array().copyOfRange(ipHeaderLen + 8, size)
-                            channel.write(ByteBuffer.wrap(payload))
+                            if (channel != null) {
+                                val payload = buffer.array().copyOfRange(ipHeaderLen + 8, size)
+                                channel.write(ByteBuffer.wrap(payload))
+                            }
                         }
                     }
                 }
@@ -184,14 +189,12 @@ class RadarVpnService : VpnService() {
                     keys.remove()
                     
                     if (key.isReadable) {
-                        val channel = key.channel() as DatagramChannel
+                        val channel = key.channel() as? DatagramChannel ?: continue
                         val responseBuffer = ByteBuffer.allocate(MTU)
                         val responseLen = channel.read(responseBuffer)
                         
                         if (responseLen > 0) {
-                            // Build IP/UDP packet for response
-                            val keyStr = key.attachment() as String
-                            // Just write raw response back to VPN
+                            // Write response back to VPN
                             vpnOutput.write(responseBuffer.array(), 0, responseLen)
                         }
                     }
@@ -266,10 +269,8 @@ class RadarVpnService : VpnService() {
                     // Process event
                     val entity = eventHandler.processEvent(event)
                     if (entity != null) {
-                        // Post entity update to EventBus
                         EventBus.getDefault().post(EntityUpdateEvent(entity))
                         
-                        // Log unknown entities
                         if (entity.uniqueName == null || entity.typeId == 0) {
                             discoveryLogger.logUnknownEntity(entity)
                         }
@@ -279,9 +280,6 @@ class RadarVpnService : VpnService() {
         }
     }
 
-    /**
-     * Entity update event for EventBus
-     */
     data class EntityUpdateEvent(val entity: GameEntity)
 
     private fun stopVpn() {
