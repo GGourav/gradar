@@ -24,32 +24,38 @@ class GRadarApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        createNotificationChannels()
+        createChannels()
     }
 
-    private fun createNotificationChannels() {
+    private fun createChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val notificationManager = getSystemService(NotificationManager::class.java)
+            val nm = getSystemService(NotificationManager::class.java)
             
+            // VPN Channel
             val vpnChannel = NotificationChannel(
                 CHANNEL_VPN_SERVICE,
                 "VPN Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Required for packet capture"
+                description = "Packet capture service"
                 setShowBadge(false)
             }
             
+            // Overlay Channel
             val overlayChannel = NotificationChannel(
                 CHANNEL_OVERLAY_SERVICE,
                 "Radar Overlay",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Displays radar on screen"
+                description = "Radar display service"
                 setShowBadge(false)
             }
             
-            notificationManager.createNotificationChannels(listOf(vpnChannel, overlayChannel))
+            try {
+                nm.createNotificationChannels(listOf(vpnChannel, overlayChannel))
+            } catch (e: Exception) {
+                // Ignore
+            }
         }
     }
 }
