@@ -5,7 +5,6 @@ import java.nio.ByteBuffer
 
 /**
  * IP Packet representation with TCP/UDP header parsing
- * Based on QRadar implementation
  */
 class Packet(buffer: ByteBuffer) {
 
@@ -13,8 +12,8 @@ class Packet(buffer: ByteBuffer) {
         const val IP4_HEADER_SIZE = 20
         const val TCP_HEADER_SIZE = 20
         const val UDP_HEADER_SIZE = 8
-        const val PROTOCOL_TCP = 6
-        const val PROTOCOL_UDP = 17
+        const val PROTOCOL_TCP: Byte = 6
+        const val PROTOCOL_UDP: Byte = 17
     }
 
     var ip4Header: IP4Header
@@ -51,10 +50,8 @@ class Packet(buffer: ByteBuffer) {
     fun duplicate(): Packet {
         val packet = Packet()
         packet.ip4Header = ip4Header.duplicate()
-
         tcpHeader?.let { packet.tcpHeader = it.duplicate() }
         udpHeader?.let { packet.udpHeader = it.duplicate() }
-
         packet.isTCP = isTCP
         packet.isUDP = isUDP
         packet.backingBuffer = backingBuffer.duplicate()
@@ -91,7 +88,6 @@ class Packet(buffer: ByteBuffer) {
         backingBuffer.putShort(IP4_HEADER_SIZE + 4, udpTotalLength.toShort())
         udpHeader?.length = udpTotalLength
 
-        // Disable UDP checksum
         backingBuffer.putShort(IP4_HEADER_SIZE + 6, 0.toShort())
         udpHeader?.checksum = 0
 
@@ -105,7 +101,6 @@ class Packet(buffer: ByteBuffer) {
 
     private fun fillHeader(buffer: ByteBuffer) {
         ip4Header.fillHeader(buffer)
-
         if (isUDP) {
             udpHeader?.fillHeader(buffer)
         } else if (isTCP) {
@@ -116,8 +111,6 @@ class Packet(buffer: ByteBuffer) {
     private fun updateIP4Checksum() {
         val buffer = backingBuffer.duplicate()
         buffer.position(0)
-
-        // Clear previous checksum
         buffer.putShort(10, 0.toShort())
 
         val ipLength = ip4Header.headerLength
@@ -140,7 +133,6 @@ class Packet(buffer: ByteBuffer) {
         val destPort = if (isUDP) udpHeader?.destinationPort else tcpHeader?.destinationPort
         val srcPort = if (isUDP) udpHeader?.sourcePort else tcpHeader?.sourcePort
         val proto = if (isUDP) "UDP" else "TCP"
-
         return "$proto:${ip4Header.destinationAddress?.hostAddress}:$destPort src=$srcPort"
     }
 
@@ -155,7 +147,6 @@ class Packet(buffer: ByteBuffer) {
         var totalLength: Int = 0
         var identificationAndFlagsAndFragmentOffset: Int = 0
         var ttl: Short = 0
-        private var protocolNum: Byte = 0
         var protocol: Byte = 0
         var headerChecksum: Int = 0
         var sourceAddress: InetAddress? = null
@@ -169,12 +160,10 @@ class Packet(buffer: ByteBuffer) {
 
             typeOfService = (buffer.get().toInt() and 0xFF).toShort()
             totalLength = buffer.short.toInt() and 0xFFFF
-
             identificationAndFlagsAndFragmentOffset = buffer.int
 
             ttl = (buffer.get().toInt() and 0xFF).toShort()
-            protocolNum = buffer.get()
-            protocol = protocolNum
+            protocol = buffer.get()
             headerChecksum = buffer.short.toInt() and 0xFFFF
 
             val addressBytes = ByteArray(4)
@@ -185,7 +174,7 @@ class Packet(buffer: ByteBuffer) {
             destinationAddress = InetAddress.getByAddress(addressBytes)
         }
 
-        private constructor()
+        constructor()
 
         fun duplicate(): IP4Header {
             val header = IP4Header()
@@ -196,7 +185,6 @@ class Packet(buffer: ByteBuffer) {
             header.totalLength = totalLength
             header.identificationAndFlagsAndFragmentOffset = identificationAndFlagsAndFragmentOffset
             header.ttl = ttl
-            header.protocolNum = protocolNum
             header.protocol = protocol
             header.headerChecksum = headerChecksum
             header.sourceAddress = sourceAddress
@@ -254,7 +242,7 @@ class Packet(buffer: ByteBuffer) {
             }
         }
 
-        private constructor()
+        constructor()
 
         fun duplicate(): TCPHeader {
             val header = TCPHeader()
@@ -308,7 +296,7 @@ class Packet(buffer: ByteBuffer) {
             checksum = buffer.short.toInt() and 0xFFFF
         }
 
-        private constructor()
+        constructor()
 
         fun duplicate(): UDPHeader {
             val header = UDPHeader()
