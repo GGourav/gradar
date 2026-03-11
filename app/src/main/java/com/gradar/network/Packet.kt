@@ -135,9 +135,6 @@ class Packet private constructor(
         return "$proto:${ip4Header.destinationAddress?.hostAddress}:$destPort src=$srcPort"
     }
 
-    /**
-     * IP4 Header
-     */
     class IP4Header {
         var version: Byte = 0
         var ihl: Byte = 0
@@ -208,9 +205,6 @@ class Packet private constructor(
         }
     }
 
-    /**
-     * TCP Header
-     */
     class TCPHeader {
         var sourcePort: Int = 0
         var destinationPort: Int = 0
@@ -269,19 +263,8 @@ class Packet private constructor(
             buffer.putShort(checksum.toShort())
             buffer.putShort(urgentPointer.toShort())
         }
-
-        companion object {
-            const val FIN: Byte = 0x01
-            const val SYN: Byte = 0x02
-            const val RST: Byte = 0x04
-            const val PSH: Byte = 0x08
-            const val ACK: Byte = 0x10
-        }
     }
 
-    /**
-     * UDP Header
-     */
     class UDPHeader {
         var sourcePort: Int = 0
         var destinationPort: Int = 0
