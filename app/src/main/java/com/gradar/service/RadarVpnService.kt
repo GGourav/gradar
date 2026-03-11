@@ -9,521 +9,307 @@ import android.util.Log
 import com.gradar.GRadarApp
 import com.gradar.MainActivity
 import com.gradar.R
-import com.gradar.handler.EventHandler
-import com.gradar.logger.DiscoveryLogger
-import com.gradar.model.GameEntity
-import com.gradar.protocol.PhotonParser
-import com.gradar.protocol.PhotonProtocol
-import org.greenrobot.eventbus.EventBus
+import com.gradar.network.NatSessionManager
+import com.gradar.network.Packet
+import com.gradar.network.UdpTunnel
+import com.gradar.radar.EntityProcessor
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.nio.ByteBuffer
-import java.nio.channels.DatagramChannel
-import java.nio.channels.SelectionKey
-import java.nio.channels.Selector
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
- * VPN Service with proper Split-Tunneling and NAT Forwarding
- * KEY: Uses allowBypass() and non-blocking IO to mirror traffic without blocking
+ * VPN Service for capturing Albion Online network traffic
+ * Implements full NAT forwarding to allow game traffic while capturing packets
  */
 class RadarVpnService : VpnService() {
 
     companion object {
-        const val TAG = "RadarVpn"
+        const val TAG = "RadarVpnService"
         const val ACTION_START = "com.gradar.action.START"
         const val ACTION_STOP = "com.gradar.action.STOP"
         const val NOTIFICATION_ID = 1001
-        
-        private const val MTU = 1500
+
+        private const val MTU = 2048
+        private const val VPN_ADDRESS = "10.8.0.2"
+        private const val VPN_PREFIX = 32
         private const val ALBION_PORT = 5056
-        
+
         @Volatile
         private var isRunning = false
-        
-        fun isRunning() = isRunning
+
+        fun isRunning(): Boolean = isRunning
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var vpnThread: Thread? = null
-    
-    private val photonParser = PhotonParser()
-    private val eventHandler = EventHandler()
-    private var discoveryLogger: DiscoveryLogger? = null
-    
-    // NAT Session Manager - Maps source ports to destination
-    private val natTable = mutableMapOf<Short, NatSession>()
-    
-    // Non-blocking selector for UDP channels
-    private var selector: Selector? = null
-    
-    // Output queue for packets going back to VPN
-    private val outputQueue = java.util.concurrent.ConcurrentLinkedQueue<ByteBuffer>()
-    
-    private var packetsCaptured = 0L
-    private var eventsProcessed = 0L
+    private var vpnReadThread: Thread? = null
+    private var vpnWriteThread: Thread? = null
+    private var tunnelCheckThread: Thread? = null
 
-    data class NatSession(
-        val sourcePort: Short,
-        val destIp: ByteArray,
-        val destPort: Short,
-        var channel: DatagramChannel? = null
-    )
+    private val outputQueue = ConcurrentLinkedQueue<Packet>()
+    private val udpTunnels = ConcurrentHashMap<Short, UdpTunnel>()
+
+    private var packetsRead = 0L
+    private var packetsWritten = 0L
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "onCreate")
-        try {
-            discoveryLogger = DiscoveryLogger(applicationContext)
-            selector = Selector.open()
-        } catch (e: Exception) {
-            Log.e(TAG, "Init error: $e")
-        }
+        Log.d(TAG, "VPN Service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand: ${intent?.action}")
-        
         when (intent?.action) {
-            ACTION_START -> startVpn()
-            ACTION_STOP -> stopVpn()
+            ACTION_START -> {
+                if (!isRunning) startVpn()
+            }
+            ACTION_STOP -> {
+                stopVpn()
+                stopSelf()
+            }
         }
-        
         return START_STICKY
     }
 
     private fun startVpn() {
-        if (isRunning) return
-        
-        Log.d(TAG, "=== STARTING VPN ===")
-        
-        try {
-            startForeground(NOTIFICATION_ID, createNotification())
-        } catch (e: Exception) {
-            Log.e(TAG, "Foreground failed: $e")
-        }
-        
-        vpnInterface = establishSplitTunnelVpn()
+        Log.d(TAG, "Starting VPN...")
+        startForeground(NOTIFICATION_ID, createNotification())
+
+        vpnInterface = establishVpn()
         if (vpnInterface == null) {
-            Log.e(TAG, "VPN interface is null - stopping")
+            Log.e(TAG, "Failed to establish VPN interface")
             stopSelf()
             return
         }
-        
+
         isRunning = true
-        vpnThread = Thread { runVpnLoop() }.apply {
-            name = "GRadar-VPN-NAT"
-            start()
-        }
-        
-        Log.d(TAG, "=== VPN STARTED ===")
+
+        // Clear any previous state
+        NatSessionManager.clearAllSessions()
+        EntityProcessor.clearAll()
+
+        // Start VPN read thread (captures packets from apps)
+        vpnReadThread = Thread({ readFromVpn() }, "VPN-Read").apply { start() }
+
+        // Start VPN write thread (writes responses back to apps)
+        vpnWriteThread = Thread({ writeToVpn() }, "VPN-Write").apply { start() }
+
+        // Start tunnel check thread (reads responses from servers)
+        tunnelCheckThread = Thread({ checkTunnels() }, "Tunnel-Check").apply { start() }
+
+        Log.d(TAG, "VPN started successfully")
     }
 
-    /**
-     * KEY FIX: Split-Tunneling with allowBypass()
-     * This allows traffic to flow normally if our logic stalls
-     */
-    private fun establishSplitTunnelVpn(): ParcelFileDescriptor? {
+    private fun establishVpn(): ParcelFileDescriptor? {
         return try {
-            val builder = Builder()
-            
-            // Standard MTU
-            builder.setMtu(MTU)
-            
-            // Local VPN address
-            builder.addAddress("10.0.0.2", 24)
-            
-            // Route all traffic through VPN (we'll filter with allowed apps)
-            builder.addRoute("0.0.0.0", 0)
-            
-            // DNS servers
-            builder.addDnsServer("8.8.8.8")
-            builder.addDnsServer("8.8.4.4")
-            
-            // =============================================
-            // KEY FIX 1: allowBypass() - CRITICAL!
-            // This allows apps to bypass VPN if needed
-            // Prevents "Connection Problem" when our logic has issues
-            // =============================================
-            builder.allowBypass()
-            
-            // =============================================
-            // KEY FIX 2: Split-Tunneling
-            // Only "invite" specific apps to the VPN
-            // Other apps use normal internet
-            // =============================================
-            try {
-                // Albion Online package
-                builder.addAllowedApplication("com.albiononline")
-                Log.d(TAG, "Added Albion to VPN tunnel")
-            } catch (e: Exception) {
-                Log.w(TAG, "Albion package not found: $e")
-            }
-            
-            try {
-                // Our radar app
-                builder.addAllowedApplication(packageName)
-                Log.d(TAG, "Added self to VPN tunnel")
-            } catch (e: Exception) {
-                Log.w(TAG, "Self package failed: $e")
-            }
-            
-            builder.setSession("G Radar - Split Tunnel")
-            
-            val result = builder.establish()
-            Log.d(TAG, "VPN established: ${result != null}")
-            result
-            
+            Builder()
+                .setMtu(MTU)
+                .addAddress(VPN_ADDRESS, VPN_PREFIX)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("8.8.8.8")
+                .addDnsServer("8.8.4.4")
+                .apply {
+                    // Only capture Albion traffic
+                    try {
+                        addAllowedApplication(GRadarApp.ALBION_PACKAGE)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not add Albion package: ${e.message}")
+                    }
+                }
+                .setSession(getString(R.string.vpn_session_name))
+                .establish()
         } catch (e: Exception) {
-            Log.e(TAG, "establishSplitTunnelVpn failed: $e")
+            Log.e(TAG, "Failed to establish VPN: ${e.message}")
             null
         }
     }
 
     /**
-     * Main VPN Loop with Non-Blocking IO
-     * KEY: Reads packets, analyzes them, AND FORWARDS them to destination
+     * Read packets from VPN interface (from apps)
      */
-    private fun runVpnLoop() {
-        Log.d(TAG, "=== VPN LOOP STARTED ===")
-        
-        val fd = vpnInterface?.fileDescriptor
-        if (fd == null) {
-            Log.e(TAG, "File descriptor is null")
-            return
-        }
-        
-        val vpnInput = FileInputStream(fd)
-        val vpnOutput = FileOutputStream(fd)
+    private fun readFromVpn() {
+        val input = FileInputStream(vpnInterface?.fileDescriptor)
         val buffer = ByteBuffer.allocate(MTU)
-        
+
+        Log.d(TAG, "VPN read thread started")
+
         try {
             while (isRunning && vpnInterface != null) {
-                // =============================================
-                // STEP 1: Read outgoing packet from VPN
-                // =============================================
                 buffer.clear()
-                val size = vpnInput.read(buffer.array())
-                
+                val size = input.read(buffer.array())
+
                 if (size > 0) {
-                    packetsCaptured++
-                    val data = buffer.array()
-                    
-                    // Analyze packet for radar (READ-ONLY, doesn't consume)
-                    analyzePacket(data, size)
-                    
-                    // Forward packet to real destination (CRITICAL!)
-                    forwardPacketToDestination(data, size)
-                }
-                
-                // =============================================
-                // STEP 2: Check for incoming responses (Non-Blocking)
-                // =============================================
-                processIncomingResponses(vpnOutput)
-                
-                // =============================================
-                // STEP 3: Write any queued responses back to VPN
-                // =============================================
-                while (true) {
-                    val queuedPacket = outputQueue.poll() ?: break
+                    buffer.limit(size)
+
                     try {
-                        vpnOutput.write(queuedPacket.array(), 0, queuedPacket.limit())
+                        val packet = Packet(buffer)
+                        packetsRead++
+
+                        when {
+                            packet.isUDP -> processUdpPacket(packet)
+                            packet.isTCP -> processTcpPacket(packet)
+                        }
+
                     } catch (e: Exception) {
-                        Log.v(TAG, "Write error: $e")
+                        // Invalid packet, skip
                     }
                 }
-                
-                // Small sleep to prevent CPU spinning
-                Thread.sleep(1)
             }
         } catch (e: Exception) {
-            Log.d(TAG, "VPN loop ended: $e")
-        } finally {
-            // Cleanup all NAT sessions
-            for (session in natTable.values) {
-                try {
-                    session.channel?.close()
-                } catch (e: Exception) {}
-            }
-            natTable.clear()
+            Log.d(TAG, "VPN read stopped: ${e.message}")
         }
-        
-        Log.d(TAG, "=== VPN LOOP ENDED ===")
+
+        Log.d(TAG, "VPN read thread ended, total packets: $packetsRead")
     }
 
     /**
-     * KEY FIX: Forward packet to actual destination
-     * This is what was missing - we read but never forwarded!
+     * Process UDP packet - forward to real server via tunnel
      */
-    private fun forwardPacketToDestination(data: ByteArray, size: Int) {
-        try {
-            if (size < 20) return
-            
-            // Check IPv4
-            val version = (data[0].toInt() shr 4) and 0x0F
-            if (version != 4) return
-            
-            val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
-            
-            // Check protocol
-            val protocol = data[9].toInt() and 0xFF
-            if (protocol != 17) return // UDP only for Albion
-            
-            if (size < ipHeaderLen + 8) return
-            
-            // Extract addresses
-            val srcPort = ((data[ipHeaderLen].toInt() and 0xFF) shl 8) or
-                          (data[ipHeaderLen + 1].toInt() and 0xFF)
-            val dstPort = ((data[ipHeaderLen + 2].toInt() and 0xFF) shl 8) or
-                          (data[ipHeaderLen + 3].toInt() and 0xFF)
-            
-            // Destination IP
-            val dstIp = InetAddress.getByAddress(byteArrayOf(
-                (data[16].toInt() and 0xFF).toByte(),
-                (data[17].toInt() and 0xFF).toByte(),
-                (data[18].toInt() and 0xFF).toByte(),
-                (data[19].toInt() and 0xFF).toByte()
-            ))
-            
-            // Get or create NAT session with UDP channel
-            val sessionKey = srcPort.toShort()
-            var session = natTable[sessionKey]
-            
-            if (session == null || session.channel?.isOpen != true) {
-                // Create new UDP channel
-                val channel = DatagramChannel.open()
-                channel.configureBlocking(false)
-                channel.connect(InetSocketAddress(dstIp, dstPort.toInt()))
-                
-                // CRITICAL: Protect this socket from VPN loop!
-                protect(channel.socket())
-                
-                // Register with selector for reading responses
-                selector?.wakeup()
-                channel.register(selector, SelectionKey.OP_READ, sessionKey)
-                
-                session = NatSession(
-                    sourcePort = sessionKey,
-                    destIp = dstIp.address,
-                    destPort = dstPort.toShort(),
-                    channel = channel
-                )
-                natTable[sessionKey] = session
-                
-                Log.d(TAG, "New NAT session: $srcPort -> ${dstIp.hostAddress}:$dstPort")
-            }
-            
-            // Extract UDP payload and send through protected channel
-            val payloadLen = size - ipHeaderLen - 8
-            if (payloadLen > 0) {
-                val payload = ByteBuffer.wrap(data, ipHeaderLen + 8, payloadLen)
-                session?.channel?.write(payload)
-            }
-            
-        } catch (e: Exception) {
-            Log.v(TAG, "Forward error: $e")
+    private fun processUdpPacket(packet: Packet) {
+        val destPort = packet.udpHeader?.destinationPort ?: return
+        val srcPort = packet.udpHeader?.sourcePort ?: return
+
+        // Get or create tunnel for this source port
+        val portKey = srcPort.toShort()
+        var tunnel = udpTunnels[portKey]
+
+        if (tunnel == null) {
+            // Create new tunnel
+            val remoteIP = packet.ip4Header.destinationAddress?.address?.let {
+                var ip = 0
+                for (i in 0..3) {
+                    ip = ip or ((it[i].toInt() and 0xFF) shl (i * 8))
+                }
+                ip
+            } ?: return
+
+            val remotePort = destPort.toShort()
+
+            // Create NAT session
+            NatSessionManager.createSession(portKey, remoteIP, remotePort, "UDP")
+
+            // Create tunnel
+            tunnel = UdpTunnel(this, outputQueue, packet, portKey)
+            udpTunnels[portKey] = tunnel
+
+            // Initialize connection
+            tunnel.initConnection()
+
+            Log.d(TAG, "Created UDP tunnel for port $srcPort -> $destPort")
+        } else {
+            // Forward packet through existing tunnel
+            tunnel.processPacket(packet)
         }
     }
 
     /**
-     * Process incoming responses from game server
+     * Process TCP packet - for now, we ignore TCP
      */
-    private fun processIncomingResponses(vpnOutput: FileOutputStream) {
+    private fun processTcpPacket(packet: Packet) {
+        // TCP not used by Albion game protocol
+    }
+
+    /**
+     * Write packets back to VPN interface (to apps)
+     */
+    private fun writeToVpn() {
+        val output = FileOutputStream(vpnInterface?.fileDescriptor)
+
+        Log.d(TAG, "VPN write thread started")
+
         try {
-            if (selector == null) return
-            
-            // Non-blocking select
-            selector!!.selectNow()
-            
-            val keys = selector!!.selectedKeys().iterator()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                keys.remove()
-                
-                if (!key.isValid || !key.isReadable) continue
-                
-                val sessionKey = key.attachment() as? Short ?: continue
-                val session = natTable[sessionKey] ?: continue
-                val channel = session.channel ?: continue
-                
-                // Read response
-                val responseBuffer = ByteBuffer.allocate(MTU)
-                val readLen = channel.read(responseBuffer)
-                
-                if (readLen > 0) {
-                    // Analyze response for radar
-                    analyzePacket(responseBuffer.array(), readLen + 28)
-                    
-                    // Build IP+UDP packet for response
-                    val packet = buildUdpResponsePacket(
-                        session.destIp,
-                        session.destPort.toInt(),
-                        session.sourcePort.toInt(),
-                        responseBuffer.array(),
-                        readLen
-                    )
-                    
-                    // Write directly to VPN output
+            while (isRunning && vpnInterface != null) {
+                val packet = outputQueue.poll()
+
+                if (packet != null) {
+                    output.write(packet.backingBuffer.array(), 0, packet.backingBuffer.limit())
+                    packetsWritten++
+                } else {
+                    Thread.sleep(1)
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "VPN write stopped: ${e.message}")
+        }
+
+        Log.d(TAG, "VPN write thread ended, total packets: $packetsWritten")
+    }
+
+    /**
+     * Check tunnels for incoming data from servers
+     */
+    private fun checkTunnels() {
+        Log.d(TAG, "Tunnel check thread started")
+
+        try {
+            while (isRunning) {
+                var hasActivity = false
+
+                for ((_, tunnel) in udpTunnels) {
                     try {
-                        vpnOutput.write(packet, 0, packet.size)
+                        if (!tunnel.processReceived()) {
+                            // Tunnel closed
+                        }
+                        hasActivity = true
                     } catch (e: Exception) {
-                        // Queue for later
-                        responseBuffer.limit(readLen + 28)
-                        outputQueue.offer(responseBuffer)
+                        // Tunnel error
                     }
+                }
+
+                for ((_, tunnel) in udpTunnels) {
+                    if (tunnel.hasDataToSend()) {
+                        hasActivity = true
+                        break
+                    }
+                }
+
+                if (!hasActivity) {
+                    Thread.sleep(5)
+                }
+
+                if (packetsRead % 100 == 0L && packetsRead > 0) {
+                    Log.d(TAG, "Stats: read=$packetsRead, write=$packetsWritten, tunnels=${udpTunnels.size}")
+                    Log.d(TAG, EntityProcessor.getStats())
                 }
             }
         } catch (e: Exception) {
-            Log.v(TAG, "Response process error: $e")
+            Log.d(TAG, "Tunnel check stopped: ${e.message}")
         }
-    }
 
-    /**
-     * Build a proper IP+UDP response packet
-     */
-    private fun buildUdpResponsePacket(
-        srcIp: ByteArray,
-        srcPort: Int,
-        dstPort: Int,
-        payload: ByteArray,
-        payloadLen: Int
-    ): ByteArray {
-        val totalLen = 20 + 8 + payloadLen // IP + UDP + payload
-        val packet = ByteArray(totalLen)
-        
-        // IP Header
-        packet[0] = 0x45.toByte() // IPv4, 20 byte header
-        packet[1] = 0 // TOS
-        packet[2] = (totalLen shr 8).toByte()
-        packet[3] = (totalLen and 0xFF).toByte()
-        packet[4] = 0 // ID
-        packet[5] = 0
-        packet[6] = 0 // Flags
-        packet[7] = 0 // Fragment offset
-        packet[8] = 64 // TTL
-        packet[9] = 17 // UDP
-        
-        // Source IP (game server)
-        packet[12] = srcIp[0]
-        packet[13] = srcIp[1]
-        packet[14] = srcIp[2]
-        packet[15] = srcIp[3]
-        
-        // Destination IP (our VPN client)
-        packet[16] = 10.toByte()
-        packet[17] = 0.toByte()
-        packet[18] = 0.toByte()
-        packet[19] = 2.toByte()
-        
-        // UDP Header
-        packet[20] = (srcPort shr 8).toByte()
-        packet[21] = (srcPort and 0xFF).toByte()
-        packet[22] = (dstPort shr 8).toByte()
-        packet[23] = (dstPort and 0xFF).toByte()
-        val udpLen = 8 + payloadLen
-        packet[24] = (udpLen shr 8).toByte()
-        packet[25] = (udpLen and 0xFF).toByte()
-        packet[26] = 0 // Checksum (optional for UDP)
-        packet[27] = 0
-        
-        // Payload
-        System.arraycopy(payload, 0, packet, 28, payloadLen)
-        
-        return packet
+        Log.d(TAG, "Tunnel check thread ended")
     }
-
-    /**
-     * Analyze packet for radar (READ-ONLY operation)
-     */
-    private fun analyzePacket(data: ByteArray, size: Int) {
-        try {
-            if (size < 28) return
-            
-            val version = (data[0].toInt() shr 4) and 0x0F
-            if (version != 4) return
-            
-            val protocol = data[9].toInt() and 0xFF
-            if (protocol != 17) return
-            
-            val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
-            if (size < ipHeaderLen + 8) return
-            
-            val srcPort = ((data[ipHeaderLen].toInt() and 0xFF) shl 8) or
-                          (data[ipHeaderLen + 1].toInt() and 0xFF)
-            val dstPort = ((data[ipHeaderLen + 2].toInt() and 0xFF) shl 8) or
-                          (data[ipHeaderLen + 3].toInt() and 0xFF)
-            
-            // Only Albion traffic
-            if (srcPort != ALBION_PORT && dstPort != ALBION_PORT) return
-            
-            val payloadStart = ipHeaderLen + 8
-            if (size <= payloadStart) return
-            
-            val payload = data.copyOfRange(payloadStart, size)
-            val packet = photonParser.parsePacket(payload, payload.size) ?: return
-            
-            for (cmd in packet.commands) {
-                if (cmd.commandType == PhotonProtocol.COMMAND_RELIABLE ||
-                    cmd.commandType == PhotonProtocol.COMMAND_UNRELIABLE) {
-                    
-                    val event = photonParser.parseEvent(cmd.data) ?: continue
-                    eventsProcessed++
-                    
-                    discoveryLogger?.logParsedEvent(event.eventCode, event.parameters)
-                    
-                    val entity = eventHandler.processEvent(event) ?: continue
-                    
-                    EventBus.getDefault().post(EntityUpdateEvent(entity))
-                    
-                    if (entity.uniqueName == null || entity.typeId == 0) {
-                        discoveryLogger?.logUnknownEntity(entity)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Silent fail for analysis
-        }
-    }
-
-    data class EntityUpdateEvent(val entity: GameEntity)
 
     private fun stopVpn() {
-        Log.d(TAG, "=== STOPPING VPN ===")
-        
+        Log.d(TAG, "Stopping VPN...")
         isRunning = false
-        
-        vpnThread?.interrupt()
-        vpnThread = null
-        
-        // Close all NAT channels
-        for (session in natTable.values) {
-            try {
-                session.channel?.close()
-            } catch (e: Exception) {}
+
+        for ((_, tunnel) in udpTunnels) {
+            tunnel.close()
         }
-        natTable.clear()
-        
-        try {
-            selector?.close()
-        } catch (e: Exception) {}
-        selector = null
-        
+        udpTunnels.clear()
+
+        vpnReadThread?.interrupt()
+        vpnWriteThread?.interrupt()
+        tunnelCheckThread?.interrupt()
+
+        vpnReadThread = null
+        vpnWriteThread = null
+        tunnelCheckThread = null
+
         vpnInterface?.close()
         vpnInterface = null
-        
-        eventHandler.clear()
-        
-        Log.d(TAG, "Stats: $packetsCaptured packets, $eventsProcessed events")
+
+        NatSessionManager.clearAllSessions()
+
+        Log.d(TAG, "VPN stopped")
     }
 
     private fun createNotification(): Notification {
-        val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
         )
-        
         return Notification.Builder(this, GRadarApp.CHANNEL_VPN_SERVICE)
             .setContentTitle(getString(R.string.notification_vpn_title))
             .setContentText(getString(R.string.notification_vpn_text))
@@ -536,5 +322,6 @@ class RadarVpnService : VpnService() {
     override fun onDestroy() {
         stopVpn()
         super.onDestroy()
+        Log.d(TAG, "VPN Service destroyed")
     }
 }
